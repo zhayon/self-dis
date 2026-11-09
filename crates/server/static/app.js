@@ -22,6 +22,9 @@ const state = {
   iceOpen: false,
   iceQueue: [],
   voiceEpoch: 0,
+  deaf: false,
+  meters: new Map(),
+  audio: null,
 };
 
 boot();
@@ -298,56 +301,75 @@ function paintChannels() {
   const box = document.querySelector(".channel-list");
   if (!box) return;
   box.replaceChildren();
-  for (const channel of state.channels) {
-    const row = el("div", "channel");
-    if (channel.kind === "text" && channel.id === state.textId) row.classList.add("active");
-    if (channel.kind === "voice" && channel.id === state.voiceChannelId) row.classList.add("active");
-    const button = el("button", "channel-name", channel.name);
-    button.type = "button";
-    button.addEventListener("click", () => {
-      if (channel.kind === "text") {
-        state.textId = channel.id;
-        state.messages = [];
-        state.seen.clear();
-        paint();
-        loadHistory(channel.id);
-      } else {
-        joinVoice(channel.id);
+  appendChannelGroup(box, "Текст", state.channels.filter((channel) => channel.kind === "text"));
+  appendChannelGroup(box, "Голос", state.channels.filter((channel) => channel.kind === "voice"));
+}
+
+function appendChannelGroup(box, label, channels) {
+  box.append(el("p", "section-label", label));
+  for (const channel of channels) box.append(channelRow(channel));
+}
+
+function channelRow(channel) {
+  const fragment = document.createDocumentFragment();
+  const row = el("div", `channel ${channel.kind}`);
+  if (channel.kind === "text" && channel.id === state.textId) row.classList.add("active");
+  if (channel.kind === "voice" && channel.id === state.voiceChannelId) row.classList.add("active");
+  const button = el("button", "channel-name");
+  button.type = "button";
+  button.append(
+    svgIcon(channel.kind === "voice" ? speakerPaths() : hashPaths(), "channel-mark"),
+    document.createTextNode(channel.name),
+  );
+  button.addEventListener("click", () => {
+    if (channel.kind === "text") {
+      state.textId = channel.id;
+      state.messages = [];
+      state.seen.clear();
+      paint();
+      loadHistory(channel.id);
+    } else {
+      joinVoice(channel.id);
+    }
+  });
+  row.append(button);
+  if (state.me?.role === "admin" && channel.kind === "voice") {
+    const rename = el("button", "icon-button", "имя");
+    rename.type = "button";
+    rename.addEventListener("click", () => {
+      const name = prompt("Новое название", channel.name);
+      if (name && name.trim()) {
+        send({ type: "rename_channel", channel_id: channel.id, name: name.trim() });
       }
     });
-    row.append(button);
-    if (state.me?.role === "admin" && channel.kind === "voice") {
-      const rename = el("button", "icon-button", "имя");
-      rename.type = "button";
-      rename.addEventListener("click", () => {
-        const name = prompt("Новое название", channel.name);
-        if (name && name.trim()) {
-          send({ type: "rename_channel", channel_id: channel.id, name: name.trim() });
-        }
-      });
-      const remove = el("button", "icon-button", "убрать");
-      remove.type = "button";
-      remove.addEventListener("click", () => {
-        if (confirm(`Убрать комнату «${channel.name}»?`)) {
-          send({ type: "delete_channel", channel_id: channel.id });
-        }
-      });
-      row.append(rename, remove);
-    }
-    box.append(row);
-    if (channel.kind === "voice") {
-      const people = el("div", "people");
-      for (const person of participants(channel.id)) {
-        const line = el(
-          "div",
-          "person",
-          person.muted ? `${person.username} · микрофон выключен` : person.username,
-        );
-        people.append(line);
+    const remove = el("button", "icon-button", "убрать");
+    remove.type = "button";
+    remove.addEventListener("click", () => {
+      if (confirm(`Убрать комнату «${channel.name}»?`)) {
+        send({ type: "delete_channel", channel_id: channel.id });
       }
-      box.append(people);
-    }
+    });
+    row.append(rename, remove);
   }
+  fragment.append(row);
+  if (channel.kind === "voice") {
+    const people = el("div", "people");
+    for (const person of participants(channel.id)) people.append(participantRow(person));
+    fragment.append(people);
+  }
+  return fragment;
+}
+
+function participantRow(person) {
+  const line = el("div", "person");
+  line.dataset.voiceUser = String(person.user_id);
+  if (person.user_id === state.me?.id) line.classList.add("self");
+  if (person.muted) line.classList.add("quiet");
+  const name = el("span", "person-name", person.username);
+  const live = svgIcon(person.muted ? micOffPaths() : speakerPaths(), "live");
+  line.append(live, name);
+  if (person.muted) line.append(el("span", "person-note", "выкл"));
+  return line;
 }
 
 function paintMessages() {
@@ -367,16 +389,43 @@ function paintVoice() {
   }
   const channel = state.channels.find((item) => item.id === state.voiceChannelId);
   bar.append(el("strong", null, channel?.name || "Голос"));
-  bar.append(el("span", null, state.voiceLabel));
+  bar.append(el("span", "voice-status", state.voiceLabel));
+  bar.append(levelMeter());
   const actions = el("div", "voice-actions");
-  const mute = el("button", null, state.muted ? "Включить микрофон" : "Выключить микрофон");
-  mute.type = "button";
-  mute.addEventListener("click", toggleMute);
-  const leave = el("button", null, "Покинуть комнату");
-  leave.type = "button";
-  leave.addEventListener("click", () => hangup(true));
-  actions.append(mute, leave);
+  actions.append(
+    iconButton(
+      state.muted ? "Включить микрофон" : "Выключить микрофон",
+      state.muted ? micOffPaths() : micPaths(),
+      state.muted,
+      toggleMute,
+    ),
+    iconButton(
+      state.deaf ? "Снова слышать комнату" : "Не слышать никого",
+      state.deaf ? headphonesOffPaths() : headphonesPaths(),
+      state.deaf,
+      toggleDeafen,
+    ),
+    iconButton("Покинуть комнату", leavePaths(), false, () => hangup(true), "leave"),
+  );
   bar.append(actions);
+}
+
+function levelMeter() {
+  const meter = el("div", "meter");
+  meter.setAttribute("aria-hidden", "true");
+  for (let index = 0; index < 4; index += 1) meter.append(el("span"));
+  return meter;
+}
+
+function iconButton(label, paths, pressed, onClick, extra) {
+  const button = el("button", extra || "");
+  button.type = "button";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  if (pressed) button.classList.add("active");
+  button.append(svgIcon(paths));
+  button.addEventListener("click", onClick);
+  return button;
 }
 
 function participants(channelId) {
@@ -431,16 +480,21 @@ async function joinVoice(channelId) {
   });
   state.pc = pc;
   state.localStream = stream;
+  watchLevel(state.me.id, stream);
   state.remoteIce = [];
   state.iceOpen = false;
   state.iceQueue = [];
   pc.addTrack(stream.getAudioTracks()[0], stream);
   pc.ontrack = (event) => {
+    const stream = event.streams[0] ?? new MediaStream([event.track]);
     const audio = document.createElement("audio");
     audio.autoplay = true;
-    audio.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+    audio.srcObject = stream;
+    audio.muted = state.deaf;
     remoteAudio.append(audio);
     audio.play().catch(() => {});
+    const userId = userIdFromStream(stream.id);
+    if (userId != null) watchLevel(userId, stream);
   };
   pc.onicecandidate = (event) => {
     const payload = {
@@ -533,6 +587,13 @@ function toggleMute() {
   }
   send({ type: "set_mute", muted: state.muted });
   paintVoice();
+  paintChannels();
+}
+
+function toggleDeafen() {
+  state.deaf = !state.deaf;
+  for (const audio of remoteAudio.querySelectorAll("audio")) audio.muted = state.deaf;
+  paintVoice();
 }
 
 function hangup(tellServer) {
@@ -541,6 +602,8 @@ function hangup(tellServer) {
   state.voiceChannelId = null;
   state.voiceLabel = "";
   state.muted = false;
+  state.deaf = false;
+  stopMeters();
   state.answerWait = null;
   state.pc?.close();
   state.pc = null;
@@ -594,6 +657,114 @@ function formatTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return date.toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" });
+}
+
+function watchLevel(userId, stream) {
+  const previous = state.meters.get(userId);
+  previous?.source.disconnect();
+  const context = audioContext();
+  const source = context.createMediaStreamSource(stream);
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 512;
+  source.connect(analyser);
+  state.meters.set(userId, { source, analyser });
+  ensureLevels();
+}
+
+function stopMeters() {
+  for (const meter of state.meters.values()) meter.source.disconnect();
+  state.meters.clear();
+}
+
+function audioContext() {
+  if (!state.audio) state.audio = new AudioContext();
+  if (state.audio.state === "suspended") state.audio.resume();
+  return state.audio;
+}
+
+function ensureLevels() {
+  if (ensureLevels.started) return;
+  ensureLevels.started = true;
+  const data = new Uint8Array(256);
+  const loop = () => {
+    requestAnimationFrame(loop);
+    for (const [userId, meter] of state.meters) {
+      meter.analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (const sample of data) {
+        const centered = (sample - 128) / 128;
+        sum += centered * centered;
+      }
+      const level = Math.sqrt(sum / data.length);
+      const speaking = level > 0.045 && !(userId === state.me?.id && state.muted);
+      const row = document.querySelector(`[data-voice-user="${userId}"]`);
+      row?.classList.toggle("speaking", speaking);
+      if (userId === state.me?.id) moveMeter(level);
+    }
+  };
+  requestAnimationFrame(loop);
+}
+
+function moveMeter(level) {
+  const bars = document.querySelectorAll(".meter span");
+  const amount = state.muted ? 0 : Math.min(1, level * 8);
+  bars.forEach((bar, index) => {
+    const gate = (index + 1) / bars.length;
+    const height = amount >= gate * 0.45 ? 0.35 + amount * 0.65 : 0.16;
+    bar.style.transform = `scaleY(${height})`;
+  });
+}
+
+function userIdFromStream(id) {
+  const match = /^user-(\d+)$/.exec(id || "");
+  return match ? Number(match[1]) : null;
+}
+
+function svgIcon(paths, className) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  if (className) svg.setAttribute("class", className);
+  for (const d of paths) {
+    const path = document.createElementNS(ns, "path");
+    path.setAttribute("d", d);
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "1.8");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    svg.append(path);
+  }
+  return svg;
+}
+
+function hashPaths() {
+  return ["M4 9h16", "M4 15h16", "M10 3 8 21", "M16 3l-2 18"];
+}
+
+function speakerPaths() {
+  return ["M4 10v4h3.5L14 19V5L7.5 10Z", "M17 9a4 4 0 0 1 0 6", "M19 7a7 7 0 0 1 0 10"];
+}
+
+function micPaths() {
+  return ["M9 6a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0Z", "M8 11a4 4 0 0 0 8 0", "M12 15v3", "M9 19h6"];
+}
+
+function micOffPaths() {
+  return [...micPaths(), "M5 5l14 14"];
+}
+
+function headphonesPaths() {
+  return ["M4 13a8 8 0 0 1 16 0", "M4 13h3v6H4Z", "M17 13h3v6h-3Z"];
+}
+
+function headphonesOffPaths() {
+  return [...headphonesPaths(), "M5 5l14 14"];
+}
+
+function leavePaths() {
+  return ["M10 5H6v14h8v-4", "M13 12h7", "M17 9l3 3-3 3"];
 }
 
 function el(tag, className, text) {
