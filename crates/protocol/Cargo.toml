@@ -1,0 +1,12 @@
+[package]
+name = "self-dis-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "JSON protocol shared by the self-dis server and a future native client"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.154"
