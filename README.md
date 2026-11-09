@@ -58,11 +58,18 @@ RTC_IP=203.0.113.10 scripts/deploy.sh ubuntu@203.0.113.10 dist/self-dis
 
 `RTC_IP` — адрес, который браузер подставляет в голос. Если флаг не задан при первой установке, скрипт берёт адрес самого сервера. Когда он серый (`10.`, `192.168.` или `172.16–31`), для голоса из интернета его нужно поправить в `/etc/self-dis.env` и выполнить `sudo systemctl restart self-dis`. Пользователь SSH должен иметь возможность `sudo`.
 
-Откройте на файрволе TCP `8080` и UDP `9000`. Страница будет на `http://<адрес>:8080`. Логи: `sudo journalctl -u self-dis -f`. Первого администратора создают на сервере:
+Откройте на файрволе TCP `8080` и UDP `9000`. Страница будет на `http://<адрес>:8080`. Логи: `sudo journalctl -u self-dis -f`. Первого администратора создают на сервере. Команду можно запускать от root: программа сама перейдёт к владельцу каталога базы.
 
 ```shell
-sudo -u self-dis /usr/local/bin/self-dis --data /var/lib/self-dis user add \
-  --username ada --password password123 --role admin
+/usr/local/bin/self-dis --data /var/lib/self-dis user add \
+  --username ada --generate-password --role admin
+```
+
+Пароль будет напечатан один раз. Для участника уберите `--role admin`. Если пароль забыт, человека не удаляют: старый вход перестаёт работать, имя и сообщения остаются.
+
+```shell
+/usr/local/bin/self-dis --data /var/lib/self-dis user passwd \
+  --username ada --generate-password
 ```
 
 Чат с другой машины по голому HTTP уже открывается. Микрофон браузер даст только если страница открыта по HTTPS. Для этого перед сервисом ставят Caddy и домен, а в `/etc/self-dis.env` оставляют `LISTEN=127.0.0.1:8080`, UDP по-прежнему наружу:

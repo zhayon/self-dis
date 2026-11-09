@@ -22,6 +22,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 futures-util = { version = "0.3.34", features = ["sink"] }
 getrandom = "0.4.3"
 include_dir = "0.7.4"
+libc = "0.2.191"
 rpassword = "7.5.4"
 self-dis-protocol = { path = "../protocol" }
 serde = { version = "1.0.229", features = ["derive"] }

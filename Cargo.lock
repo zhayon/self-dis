@@ -2225,6 +2225,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "include_dir",
+ "libc",
  "reqwest",
  "rpassword",
  "self-dis-protocol",

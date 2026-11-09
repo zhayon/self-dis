@@ -104,6 +104,10 @@ impl AppState {
         db::list_users(&self.db).await
     }
 
+    pub async fn set_password(&self, username: &str, password: &str) -> Result<User, Error> {
+        db::set_password(&self.db, username, password).await
+    }
+
     pub async fn list_channels(&self) -> Result<Vec<Channel>, Error> {
         db::list_channels(&self.db).await
     }

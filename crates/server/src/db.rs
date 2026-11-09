@@ -98,6 +98,39 @@ pub async fn create_user(
     })
 }
 
+pub async fn set_password(
+    pool: &SqlitePool,
+    username: &str,
+    password: &str,
+) -> Result<User, Error> {
+    let username = validate::username(username)?;
+    let password = validate::password(password)?;
+    let password_hash = hash_password(password)?;
+    let mut tx = pool.begin().await.map_err(map_sql)?;
+    let row: Option<UserRow> =
+        sqlx::query_as("SELECT id, username, role FROM users WHERE username = ?")
+            .bind(&username)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sql)?;
+    let Some(row) = row else {
+        return Err(Error::Invalid("нет пользователя с таким именем".into()));
+    };
+    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+        .bind(password_hash)
+        .bind(row.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+        .bind(row.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+    tx.commit().await.map_err(map_sql)?;
+    row.into_user()
+}
+
 pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, Error> {
     let rows: Vec<UserRow> = sqlx::query_as("SELECT id, username, role FROM users ORDER BY id")
         .fetch_all(pool)

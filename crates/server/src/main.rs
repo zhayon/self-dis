@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use self_dis_protocol::{ChannelKind, Role};
@@ -48,10 +48,22 @@ enum UserCommand {
         #[arg(long)]
         username: String,
         /// Если не задан, пароль спрашивается в терминале
-        #[arg(long)]
+        #[arg(long, conflicts_with = "generate_password")]
         password: Option<String>,
+        /// Придумать пароль и напечатать его
+        #[arg(long, conflicts_with = "password")]
+        generate_password: bool,
         #[arg(long, value_enum, default_value = "member")]
         role: RoleArg,
+    },
+    /// Поставить новый пароль. Старые входы этого человека перестают работать
+    Passwd {
+        #[arg(long)]
+        username: String,
+        #[arg(long, conflicts_with = "generate_password")]
+        password: Option<String>,
+        #[arg(long, conflicts_with = "password")]
+        generate_password: bool,
     },
     List,
 }
@@ -104,6 +116,7 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), Error> {
+    drop_to_data_owner(&cli.data)?;
     let state = AppState::open(&cli.data).await?;
     match cli.command {
         Command::Serve {
@@ -146,16 +159,29 @@ async fn user_command(state: &AppState, command: UserCommand) -> Result<(), Erro
         UserCommand::Add {
             username,
             password,
+            generate_password,
             role,
         } => {
-            let password = match password {
-                Some(password) => password,
-                None => rpassword::prompt_password("Пароль: ").map_err(|err| {
-                    Error::Internal(format!("не удалось прочитать пароль: {err}"))
-                })?,
-            };
+            let (password, generated) = choose_password(password, generate_password)?;
             let user = state.create_user(&username, &password, role.into()).await?;
             println!("{} {} {}", user.id, role_label(user.role), user.username);
+            if generated {
+                println!("пароль: {password}");
+            }
+        }
+        UserCommand::Passwd {
+            username,
+            password,
+            generate_password,
+        } => {
+            let (password, generated) = choose_password(password, generate_password)?;
+            let user = state.set_password(&username, &password).await?;
+            println!("{} {} {}", user.id, role_label(user.role), user.username);
+            if generated {
+                println!("пароль: {password}");
+            } else {
+                println!("пароль обновлён");
+            }
         }
         UserCommand::List => {
             for user in state.list_users().await? {
@@ -193,6 +219,55 @@ async fn channel_command(state: &AppState, command: ChannelCommand) -> Result<()
         }
     }
     Ok(())
+}
+
+fn drop_to_data_owner(data: &Path) -> Result<(), Error> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(());
+    }
+    let meta = match std::fs::metadata(data) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(Error::Internal(err.to_string())),
+    };
+    use std::os::unix::fs::MetadataExt;
+    let uid = meta.uid();
+    let gid = meta.gid();
+    if uid == 0 {
+        return Ok(());
+    }
+    // Каталог базы принадлежит служебному пользователю. Root может писать в файл,
+    // но SQLite создаст рядом служебные файлы уже от root, и сервис их не откроет.
+    let dropped = unsafe { libc::setgid(gid) == 0 && libc::setuid(uid) == 0 };
+    if dropped {
+        Ok(())
+    } else {
+        Err(Error::Internal(
+            "не удалось перейти к владельцу каталога базы".into(),
+        ))
+    }
+}
+
+fn choose_password(password: Option<String>, generate: bool) -> Result<(String, bool), Error> {
+    if generate {
+        return Ok((generate_password()?, true));
+    }
+    if let Some(password) = password {
+        return Ok((password, false));
+    }
+    let password = rpassword::prompt_password("Пароль: ")
+        .map_err(|err| Error::Internal(format!("не удалось прочитать пароль: {err}")))?;
+    Ok((password, false))
+}
+
+fn generate_password() -> Result<String, Error> {
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|err| Error::Internal(err.to_string()))?;
+    Ok(bytes
+        .into_iter()
+        .map(|byte| ALPHABET[byte as usize % ALPHABET.len()] as char)
+        .collect())
 }
 
 fn role_label(role: Role) -> &'static str {

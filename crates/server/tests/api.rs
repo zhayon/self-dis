@@ -411,6 +411,46 @@ fn is_channel_created(message: &ServerMessage) -> bool {
     matches!(message, ServerMessage::ChannelCreated { .. })
 }
 
+#[tokio::test]
+async fn new_password_replaces_the_old_one() {
+    let dir = std::env::temp_dir().join(format!(
+        "self-dis-pass-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _cleanup = Cleanup(&dir);
+    let state = AppState::open(&dir).await.unwrap();
+    state
+        .create_user("ada", "password123", Role::Admin)
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+    login(&client, &base, "ada", "password123").await;
+
+    state.set_password("ada", "another-pass").await.unwrap();
+    let stale = client
+        .post(format!("{base}/api/login"))
+        .json(&LoginRequest {
+            username: "ada".into(),
+            password: "password123".into(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), 401);
+    login(&client, &base, "ada", "another-pass").await;
+}
+
 fn is_voice_state(message: &ServerMessage) -> bool {
     matches!(message, ServerMessage::VoiceState { .. })
 }
