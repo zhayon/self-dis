@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -22,3 +24,12 @@ jobs:
           name: self-dis-linux-amd64
           path: target/release/self-dis
           if-no-files-found: error
+      - name: Опубликовать бинарь
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete linux-bin --yes --cleanup-tag || true
+          gh release create linux-bin target/release/self-dis \
+            --title "Linux amd64" \
+            --notes "Бинарь для Ubuntu. Обновляется при сборке main." \
+            --latest=false
