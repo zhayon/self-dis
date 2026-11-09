@@ -1,0 +1,24 @@
+name: Linux binary
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Собрать бинарь
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake pkg-config
+          cargo build --release -p self-dis-server --bin self-dis
+      - uses: actions/upload-artifact@v4
+        with:
+          name: self-dis-linux-amd64
+          path: target/release/self-dis
+          if-no-files-found: error

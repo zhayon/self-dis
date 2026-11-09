@@ -24,12 +24,11 @@
 //! rowid). Время в JSON — RFC 3339 в UTC, например `2026-11-09T10:00:00Z`.
 //! Неизвестное поле клиент и сервер игнорируют. Неизвестный `type` — ошибка.
 //!
-//! Голос в этой версии только описан. На [`ClientMessage::JoinVoice`],
-//! [`ClientMessage::LeaveVoice`], [`ClientMessage::SetMute`] и любые `rtc_*`
-//! сервер отвечает [`ServerMessage::Error`] с кодом `voice_not_ready` и
-//! состояние голоса не меняет.
+//! Голос идёт отдельным UDP. Клиент поднимает одно `RTCPeerConnection` к серверу.
+//! Если голосовой сокет не запущен, сервер отвечает [`ServerMessage::Error`]
+//! с кодом `voice_not_ready`.
 //!
-//! Когда голос появится, клиент поднимает одно `RTCPeerConnection` к серверу.
+//! Клиент шлёт [`ClientMessage::JoinVoice`], затем [`ClientMessage::RtcOffer`].
 //! Первым SDP-кадром клиент шлёт [`ClientMessage::RtcOffer`]. Сервер отвечает
 //! [`ServerMessage::RtcAnswer`]. Обе стороны шлют `rtc_ice`. Чтобы добавить
 //! или убрать дорожку, сервер присылает [`ServerMessage::RtcOffer`], а клиент

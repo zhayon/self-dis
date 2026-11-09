@@ -1,8 +1,13 @@
+use std::path::PathBuf;
+
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State};
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::request::Parts;
+use axum::http::{StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use include_dir::{include_dir, Dir};
 use self_dis_protocol::{
     Channel, ChatMessage, HistoryQuery, LoginRequest, LoginResponse, User, HISTORY_DEFAULT_LIMIT,
     HISTORY_MAX_LIMIT,
@@ -13,6 +18,8 @@ use crate::db;
 use crate::error::{ApiError, Error};
 use crate::state::AppState;
 
+static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/static");
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -22,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/channels", get(channels))
         .route("/api/channels/{id}/messages", get(messages))
         .route("/api/ws", get(crate::ws::upgrade))
+        .fallback(frontend)
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -29,6 +37,67 @@ pub fn router(state: AppState) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn frontend(uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    if let Some(body) = read_asset(path) {
+        return asset_response(path, body);
+    }
+    match read_asset("index.html") {
+        Some(body) => asset_response("index.html", body),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn asset_response(path: &str, body: Vec<u8>) -> Response {
+    (
+        StatusCode::OK,
+        [
+            (CONTENT_TYPE, content_type(path)),
+            (CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+fn read_asset(path: &str) -> Option<Vec<u8>> {
+    if !safe_asset_path(path) {
+        return None;
+    }
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
+    if dev.is_dir() {
+        let file = dev.join(path);
+        if file.is_file() {
+            return std::fs::read(file).ok();
+        }
+    }
+    ASSETS.get_file(path).map(|file| file.contents().to_vec())
+}
+
+fn safe_asset_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+fn content_type(path: &str) -> &'static str {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+    {
+        Some("html") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        _ => "application/octet-stream",
+    }
 }
 
 async fn login(

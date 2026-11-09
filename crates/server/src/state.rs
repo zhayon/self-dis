@@ -1,13 +1,16 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use self_dis_protocol::{Channel, Role, ServerMessage, User};
+use self_dis_protocol::{Channel, Role, ServerMessage, User, VoiceRoom};
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
 use crate::db;
 use crate::error::Error;
+use crate::voice::Voice;
 
 struct Online {
     user: User,
@@ -19,6 +22,7 @@ pub struct AppState {
     pub(crate) db: SqlitePool,
     events: broadcast::Sender<Arc<str>>,
     presence: Arc<Mutex<HashMap<i64, Online>>>,
+    pub(crate) voice: Voice,
 }
 
 impl AppState {
@@ -28,7 +32,16 @@ impl AppState {
             db: db::open(data_dir).await?,
             events,
             presence: Arc::new(Mutex::new(HashMap::new())),
+            voice: Voice::new(),
         })
+    }
+
+    pub fn start_voice(&self, bind: SocketAddr, advertise_ip: IpAddr) -> Result<SocketAddr, Error> {
+        self.voice.start(bind, advertise_ip, self.clone())
+    }
+
+    pub(crate) fn voice_snapshot(&self) -> Vec<VoiceRoom> {
+        self.voice.snapshot()
     }
 
     pub fn publish(&self, message: &ServerMessage) {
@@ -111,14 +124,28 @@ impl AppState {
 pub(crate) struct PresenceGuard {
     pub(crate) state: AppState,
     pub(crate) user_id: i64,
+    pub(crate) signal_id: u64,
+    pub(crate) joined_voice: Arc<AtomicBool>,
 }
 
 impl Drop for PresenceGuard {
     fn drop(&mut self) {
+        self.state.voice.unregister_socket(self.signal_id);
+        if self.joined_voice.swap(false, Ordering::Relaxed) {
+            self.state.voice.leave(self.user_id);
+        }
         if self.state.leave(self.user_id) {
             self.state.publish(&ServerMessage::UserOffline {
                 user_id: self.user_id,
             });
         }
     }
+}
+
+pub(crate) fn mark_voice_join(flag: &AtomicBool) {
+    flag.store(true, Ordering::Relaxed);
+}
+
+pub(crate) fn mark_voice_leave(flag: &AtomicBool) {
+    flag.store(false, Ordering::Relaxed);
 }

@@ -1,0 +1,217 @@
+:root {
+  color-scheme: dark;
+  --bg: #14120f;
+  --panel: #1e1b16;
+  --panel-2: #27231d;
+  --line: #3c352c;
+  --text: #f3eee4;
+  --muted: #a39888;
+  --accent: #e0b15a;
+  --accent-ink: #2a2112;
+  --danger: #e07a68;
+  --ok: #8fbf8a;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+* { box-sizing: border-box; }
+
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+button, input, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+#app { min-height: 100vh; }
+
+.login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.login form {
+  width: min(380px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 28px;
+  display: grid;
+  gap: 14px;
+}
+
+.wordmark {
+  font-family: Palatino, "Iowan Old Style", Georgia, serif;
+  font-size: 40px;
+  margin: 0;
+  letter-spacing: -0.03em;
+}
+
+.lede { margin: 0; color: var(--muted); }
+
+label { display: grid; gap: 6px; color: var(--muted); font-size: 14px; }
+
+input, textarea {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+textarea { resize: vertical; min-height: 46px; }
+
+button.primary, .composer button, .new-room button {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-weight: 600;
+}
+
+.login-error { min-height: 1.2em; color: var(--danger); margin: 0; }
+
+.shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 280px 1fr;
+}
+
+aside {
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  padding: 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 100vh;
+}
+
+.who { color: var(--muted); font-size: 14px; }
+
+.section-label {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.channel-list { display: grid; gap: 4px; }
+
+.channel, .person {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.person { border: 0; }
+
+.channel-name {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  padding: 0;
+}
+
+.channel.active, .channel:hover, .person:hover { background: var(--panel-2); }
+
+.channel small, .person span { color: var(--muted); }
+
+.people { display: grid; padding: 0 8px 6px 18px; }
+
+.icon-button {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  padding: 2px 6px;
+}
+
+.new-room, .voice-bar { display: grid; gap: 8px; }
+
+.voice-bar {
+  margin-top: auto;
+  background: var(--panel-2);
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.voice-actions { display: flex; gap: 8px; }
+
+.voice-actions button, .logout {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+main {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 100vh;
+}
+
+.chat-head {
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.chat-head h2 { margin: 0; font-size: 20px; }
+
+.messages {
+  overflow: auto;
+  padding: 18px 22px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.message { display: grid; grid-template-columns: 140px 1fr; gap: 12px; }
+
+.message time, .message strong { color: var(--muted); font-weight: 600; font-size: 14px; }
+
+.message p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.composer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  padding: 14px 22px 18px;
+}
+
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  background: #3a2824;
+  color: var(--text);
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  padding: 10px 16px;
+}
+
+@media (max-width: 800px) {
+  .shell { grid-template-columns: 1fr; }
+  aside { min-height: auto; }
+  .message { grid-template-columns: 1fr; gap: 2px; }
+}

@@ -1,0 +1,17 @@
+---
+description: Ограничения браузерного клиента self-dis
+globs: crates/server/static/**
+alwaysApply: false
+---
+
+# Браузер
+
+Сборки нет: страница, CSS и модуль JS лежат в `crates/server/static` и отдаются бинарником.
+
+- Текст людей писать через `textContent`. Не собирать сообщения через `innerHTML`.
+- Токен только в `sessionStorage` под ключом `self-dis-token`.
+- Повтор `message.id` пропускать. Канал и пользователя с тем же id заменять.
+- Обрыв сокета переподключает через секунду и сам в голос не входит.
+- Offer первым создаёт клиент. `onnegotiationneeded` не использовать. Свои ICE слать после offer, чужие применять после `remoteDescription`.
+- Отказ `getUserMedia` показывает «нет доступа к микрофону» и шлёт `leave_voice`.
+- На `localhost` и `127.0.0.1` список `iceServers` пустой. Иначе один STUN Google, без TURN.

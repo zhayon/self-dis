@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -20,9 +20,15 @@ struct Cli {
 enum Command {
     /// Слушать HTTP и WebSocket
     Serve {
-        /// Адрес, например 0.0.0.0:8080
+        /// Адрес HTTP, например 0.0.0.0:8080
         #[arg(long, default_value = "127.0.0.1:8080")]
         listen: SocketAddr,
+        /// UDP-сокет WebRTC. Порт 0 выбирает свободный
+        #[arg(long, default_value = "0.0.0.0:9000")]
+        rtc_udp: SocketAddr,
+        /// Адрес, который браузер подставляет в ICE. Для VPS это публичный IP
+        #[arg(long)]
+        rtc_ip: Option<IpAddr>,
     },
     /// Пользователи. Открытой регистрации нет
     User {
@@ -100,7 +106,22 @@ async fn main() {
 async fn run(cli: Cli) -> Result<(), Error> {
     let state = AppState::open(&cli.data).await?;
     match cli.command {
-        Command::Serve { listen } => serve(state, listen).await,
+        Command::Serve {
+            listen,
+            rtc_udp,
+            rtc_ip,
+        } => {
+            let advertise_ip = rtc_ip.unwrap_or_else(|| {
+                if listen.ip().is_unspecified() {
+                    IpAddr::V4(Ipv4Addr::LOCALHOST)
+                } else {
+                    listen.ip()
+                }
+            });
+            let rtc = state.start_voice(rtc_udp, advertise_ip)?;
+            tracing::info!(%listen, %rtc, "сервер слушает");
+            serve(state, listen).await
+        }
         Command::User { command } => user_command(&state, command).await,
         Command::Channel { command } => channel_command(&state, command).await,
     }
@@ -111,7 +132,6 @@ async fn serve(state: AppState, listen: SocketAddr) -> Result<(), Error> {
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .map_err(|err| Error::Internal(format!("не удалось занять {listen}: {err}")))?;
-    tracing::info!(%listen, "сервер слушает");
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

@@ -1,0 +1,16 @@
+[Unit]
+Description=self-dis
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=self-dis
+Group=self-dis
+EnvironmentFile=/etc/self-dis.env
+ExecStart=/usr/local/bin/self-dis --data /var/lib/self-dis serve --listen ${LISTEN} --rtc-udp ${RTC_UDP} --rtc-ip ${RTC_IP}
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

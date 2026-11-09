@@ -3,6 +3,7 @@ mod error;
 mod http;
 mod state;
 mod validate;
+mod voice;
 mod ws;
 
 pub use error::Error;

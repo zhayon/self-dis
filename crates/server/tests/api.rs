@@ -42,6 +42,14 @@ async fn login_chat_and_voice_rooms() {
     let health = client.get(format!("{base}/health")).send().await.unwrap();
     assert_eq!(health.status(), 200);
 
+    let page = client.get(format!("{base}/")).send().await.unwrap();
+    assert_eq!(page.status(), 200);
+    let html = page.text().await.unwrap();
+    assert!(html.contains("self-dis"));
+    let script = client.get(format!("{base}/app.js")).send().await.unwrap();
+    assert_eq!(script.status(), 200);
+    assert!(script.text().await.unwrap().contains("self-dis-token"));
+
     let anonymous = client.get(format!("{base}/api/me")).send().await.unwrap();
     assert_eq!(anonymous.status(), 401);
 
@@ -171,6 +179,18 @@ async fn login_chat_and_voice_rooms() {
 
     send(
         &mut ada_ws,
+        &ClientMessage::JoinVoice {
+            channel_id: text_id,
+        },
+    )
+    .await;
+    match until(&mut ada_ws, is_error).await {
+        ServerMessage::Error { code, .. } => assert_eq!(code, "invalid"),
+        other => panic!("ожидался отказ войти в текстовый канал, пришло {other:?}"),
+    }
+
+    send(
+        &mut ada_ws,
         &ClientMessage::DeleteChannel {
             channel_id: text_id,
         },
@@ -179,6 +199,115 @@ async fn login_chat_and_voice_rooms() {
     match until(&mut ada_ws, is_error).await {
         ServerMessage::Error { code, .. } => assert_eq!(code, "invalid"),
         other => panic!("ожидался отказ удалить чат, пришло {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn voice_join_updates_roster() {
+    let dir = std::env::temp_dir().join(format!(
+        "self-dis-voice-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _cleanup = Cleanup(&dir);
+    let state = AppState::open(&dir).await.unwrap();
+    state
+        .create_user("ada", "password123", Role::Admin)
+        .await
+        .unwrap();
+    state
+        .start_voice(
+            "127.0.0.1:0".parse().unwrap(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        )
+        .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router(state)).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+    let ada = login(&client, &base, "ada", "password123").await;
+    let mut socket = connect(addr, &ada.token).await;
+    let text_id = match recv(&mut socket).await {
+        ServerMessage::Ready {
+            channels, voice, ..
+        } => {
+            assert!(voice.is_empty());
+            channels
+                .iter()
+                .find(|channel| channel.kind == ChannelKind::Text)
+                .unwrap()
+                .id
+        }
+        other => panic!("ожидался ready, пришло {other:?}"),
+    };
+
+    send(
+        &mut socket,
+        &ClientMessage::CreateVoiceChannel {
+            name: "болталка".into(),
+        },
+    )
+    .await;
+    let voice_id = match until(&mut socket, is_channel_created).await {
+        ServerMessage::ChannelCreated { channel } => channel.id,
+        other => panic!("ожидалось создание комнаты, пришло {other:?}"),
+    };
+
+    send(
+        &mut socket,
+        &ClientMessage::JoinVoice {
+            channel_id: text_id,
+        },
+    )
+    .await;
+    match until(&mut socket, is_error).await {
+        ServerMessage::Error { code, .. } => assert_eq!(code, "invalid"),
+        other => panic!("ожидался отказ, пришло {other:?}"),
+    }
+
+    send(
+        &mut socket,
+        &ClientMessage::JoinVoice {
+            channel_id: voice_id,
+        },
+    )
+    .await;
+    match until(&mut socket, is_voice_state).await {
+        ServerMessage::VoiceState {
+            channel_id,
+            participants,
+        } => {
+            assert_eq!(channel_id, voice_id);
+            assert_eq!(participants.len(), 1);
+            assert_eq!(participants[0].user_id, ada.user.id);
+            assert_eq!(participants[0].username, "ada");
+            assert!(!participants[0].muted);
+        }
+        other => panic!("ожидался состав комнаты, пришло {other:?}"),
+    }
+
+    send(&mut socket, &ClientMessage::SetMute { muted: true }).await;
+    match until(&mut socket, is_voice_state).await {
+        ServerMessage::VoiceState { participants, .. } => {
+            assert!(participants[0].muted);
+        }
+        other => panic!("ожидался состав комнаты, пришло {other:?}"),
+    }
+
+    send(&mut socket, &ClientMessage::LeaveVoice).await;
+    match until(&mut socket, is_voice_state).await {
+        ServerMessage::VoiceState { participants, .. } => {
+            assert!(participants.is_empty());
+        }
+        other => panic!("ожидалась пустая комната, пришло {other:?}"),
     }
 }
 
@@ -280,6 +409,10 @@ fn is_error(message: &ServerMessage) -> bool {
 
 fn is_channel_created(message: &ServerMessage) -> bool {
     matches!(message, ServerMessage::ChannelCreated { .. })
+}
+
+fn is_voice_state(message: &ServerMessage) -> bool {
+    matches!(message, ServerMessage::VoiceState { .. })
 }
 
 struct Cleanup<'a>(&'a std::path::Path);

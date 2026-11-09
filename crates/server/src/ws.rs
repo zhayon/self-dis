@@ -3,14 +3,17 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
 use self_dis_protocol::{
-    ClientMessage, ServerMessage, User, PROTOCOL_VERSION, WS_AUTH_TIMEOUT_SECS,
+    ChannelKind, ClientMessage, ServerMessage, User, PROTOCOL_VERSION, WS_AUTH_TIMEOUT_SECS,
 };
 use tokio::sync::broadcast;
 
 use crate::db;
 use crate::error::Error;
-use crate::state::{AppState, PresenceGuard};
+use crate::state::{mark_voice_join, mark_voice_leave, AppState, PresenceGuard};
 
 const MAX_FRAME_BYTES: usize = 256 * 1024;
 
@@ -28,10 +31,15 @@ async fn handle(mut socket: WebSocket, state: AppState) {
     };
 
     let mut events = state.subscribe();
+    let signal = state.voice.register_socket();
+    let mut signal_rx = signal.rx;
+    let joined_voice = Arc::new(AtomicBool::new(false));
     let first = state.join(&user);
     let _guard = PresenceGuard {
         state: state.clone(),
         user_id: user.id,
+        signal_id: signal.id,
+        joined_voice: Arc::clone(&joined_voice),
     };
     if first {
         state.publish(&ServerMessage::UserOnline { user: user.clone() });
@@ -49,7 +57,7 @@ async fn handle(mut socket: WebSocket, state: AppState) {
         user: user.clone(),
         channels,
         online: state.online_users(),
-        voice: Vec::new(),
+        voice: state.voice_snapshot(),
     };
     if send_message(&mut socket, &ready).await.is_err() {
         return;
@@ -61,7 +69,16 @@ async fn handle(mut socket: WebSocket, state: AppState) {
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        if !handle_text(&state, &user, text.as_str(), &mut socket).await {
+                        if !handle_text(
+                            &state,
+                            &user,
+                            signal.id,
+                            &joined_voice,
+                            text.as_str(),
+                            &mut socket,
+                        )
+                        .await
+                        {
                             break;
                         }
                     }
@@ -82,6 +99,16 @@ async fn handle(mut socket: WebSocket, state: AppState) {
             event = events.recv() => {
                 if !forward_event(&mut socket, event).await {
                     break;
+                }
+            }
+            signal = signal_rx.recv() => {
+                match signal {
+                    Some(message) => {
+                        if send_message(&mut socket, &message).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
                 }
             }
         }
@@ -112,7 +139,14 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState) -> Result<User, 
 }
 
 /// `false` means the socket should close.
-async fn handle_text(state: &AppState, user: &User, text: &str, socket: &mut WebSocket) -> bool {
+async fn handle_text(
+    state: &AppState,
+    user: &User,
+    signal_id: u64,
+    joined_voice: &AtomicBool,
+    text: &str,
+    socket: &mut WebSocket,
+) -> bool {
     if text.len() > MAX_FRAME_BYTES {
         return reply(socket, &Error::Invalid("слишком большой кадр".into())).await;
     }
@@ -120,7 +154,7 @@ async fn handle_text(state: &AppState, user: &User, text: &str, socket: &mut Web
         Ok(message) => message,
         Err(_) => return reply(socket, &Error::Invalid("некорректный json".into())).await,
     };
-    let result = dispatch(state, user, message).await;
+    let result = dispatch(state, user, signal_id, joined_voice, message).await;
     match result {
         Ok(Some(event)) => {
             state.publish(&event);
@@ -134,6 +168,8 @@ async fn handle_text(state: &AppState, user: &User, text: &str, socket: &mut Web
 async fn dispatch(
     state: &AppState,
     user: &User,
+    signal_id: u64,
+    joined_voice: &AtomicBool,
     message: ClientMessage,
 ) -> Result<Option<ServerMessage>, Error> {
     match message {
@@ -155,14 +191,45 @@ async fn dispatch(
         ClientMessage::DeleteChannel { channel_id } => {
             ensure_admin(user)?;
             db::delete_channel(&state.db, channel_id).await?;
+            state.voice.drop_channel(channel_id);
             Ok(Some(ServerMessage::ChannelDeleted { channel_id }))
         }
-        ClientMessage::JoinVoice { .. }
-        | ClientMessage::LeaveVoice
-        | ClientMessage::SetMute { .. }
-        | ClientMessage::RtcOffer { .. }
-        | ClientMessage::RtcAnswer { .. }
-        | ClientMessage::RtcIce { .. } => Err(Error::VoiceNotReady),
+        ClientMessage::JoinVoice { channel_id } => {
+            let channel = db::find_channel(&state.db, channel_id).await?;
+            if channel.kind != ChannelKind::Voice {
+                return Err(Error::Invalid("это не голосовая комната".into()));
+            }
+            state
+                .voice
+                .join(signal_id, user.id, &user.username, channel_id)?;
+            mark_voice_join(joined_voice);
+            Ok(None)
+        }
+        ClientMessage::LeaveVoice => {
+            mark_voice_leave(joined_voice);
+            state.voice.leave(user.id);
+            Ok(None)
+        }
+        ClientMessage::SetMute { muted } => {
+            state.voice.mute(user.id, muted)?;
+            Ok(None)
+        }
+        ClientMessage::RtcOffer { sdp } => {
+            state.voice.offer(user.id, signal_id, sdp)?;
+            Ok(None)
+        }
+        ClientMessage::RtcAnswer { sdp } => {
+            state.voice.answer(user.id, sdp)?;
+            Ok(None)
+        }
+        ClientMessage::RtcIce {
+            candidate: Some(candidate),
+            ..
+        } if !candidate.is_empty() => {
+            state.voice.ice(user.id, candidate)?;
+            Ok(None)
+        }
+        ClientMessage::RtcIce { .. } => Ok(None),
     }
 }
 
