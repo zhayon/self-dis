@@ -3,7 +3,7 @@ const toast = document.querySelector("#toast");
 const remoteAudio = document.querySelector("#remote-audio");
 
 const state = {
-  token: sessionStorage.getItem("self-dis-token"),
+  token: localStorage.getItem("self-dis-token"),
   me: null,
   channels: [],
   online: [],
@@ -36,7 +36,7 @@ async function boot() {
   }
   const me = await api("/api/me");
   if (!me.ok) {
-    sessionStorage.removeItem("self-dis-token");
+    localStorage.removeItem("self-dis-token");
     state.token = null;
     renderLogin();
     return;
@@ -78,7 +78,7 @@ function renderLogin(message = "") {
     const session = await response.json();
     state.token = session.token;
     state.me = session.user;
-    sessionStorage.setItem("self-dis-token", session.token);
+    localStorage.setItem("self-dis-token", session.token);
     renderShell();
     connect();
   });
@@ -624,7 +624,7 @@ function iceLabel(value) {
 async function logout() {
   hangup(true);
   await api("/api/logout", { method: "POST" });
-  sessionStorage.removeItem("self-dis-token");
+  localStorage.removeItem("self-dis-token");
   state.token = null;
   state.socket?.close();
   state.socket = null;
