@@ -278,7 +278,7 @@ fn run(
         if let Err(err) = socket.set_read_timeout(Some(wait)) {
             return Err(err.to_string());
         }
-        if let Some(input) = read_socket_input(&socket, &mut buf) {
+        if let Some(input) = read_socket_input(&socket, advertise, &mut buf) {
             if let Some(client) = clients.iter_mut().find(|client| client.accepts(&input)) {
                 client.handle_input(input);
             }
@@ -520,7 +520,11 @@ fn propagate(propagated: &Propagated, clients: &mut [Client]) {
     }
 }
 
-fn read_socket_input<'a>(socket: &UdpSocket, buf: &'a mut Vec<u8>) -> Option<Input<'a>> {
+fn read_socket_input<'a>(
+    socket: &UdpSocket,
+    advertise: SocketAddr,
+    buf: &'a mut Vec<u8>,
+) -> Option<Input<'a>> {
     buf.resize(2000, 0);
     match socket.recv_from(buf) {
         Ok((size, source)) => {
@@ -528,12 +532,18 @@ fn read_socket_input<'a>(socket: &UdpSocket, buf: &'a mut Vec<u8>) -> Option<Inp
             let Ok(contents) = buf.as_slice().try_into() else {
                 return None;
             };
+            // Сокет на 0.0.0.0 сообщает local_addr как 0.0.0.0. ICE сверяет адрес
+            // назначения с объявленным host-кандидатом и иначе молча выбрасывает STUN.
+            let mut destination = socket.local_addr().ok()?;
+            if destination.ip().is_unspecified() {
+                destination.set_ip(advertise.ip());
+            }
             Some(Input::Receive(
                 Instant::now(),
                 Receive {
                     proto: Protocol::Udp,
                     source,
-                    destination: socket.local_addr().ok()?,
+                    destination,
                     contents,
                 },
             ))
