@@ -38,4 +38,5 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
 reqwest = { version = "0.13.5", features = ["json"] }
+self-dis-client = { path = "../client" }
 tokio-tungstenite = { version = "0.30.0", features = ["connect"] }

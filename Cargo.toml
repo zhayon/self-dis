@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/server"]
+members = ["crates/protocol", "crates/server", "crates/client"]
 
 # Argon2 в debug-сборке без этого считает пароль несколько секунд.
 [profile.dev.package.argon2]

@@ -14,7 +14,7 @@
 - База SQLite. Состав голосовых комнат только в памяти: перезапуск роняет голос, чат остаётся.
 - Голос — WebRTC SFU на `str0m`. Сервер пересылает Opus и не смешивает. Одно `RTCPeerConnection` на участника. Видеодорожки отличаем и пока отвергаем. TURN нет.
 - HTTP-токен только заголовком `Authorization: Bearer`. Браузерный WebSocket его не ставит, поэтому первый кадр — `auth`.
-- Нативный клиент не писать, пока его явно не попросили. Видео и демонстрацию экрана не добавлять в этот этап.
+- Нативный клиент macOS/Windows — `crates/client`. Видео и демонстрацию экрана не добавлять. Шумодав микрофона не писать, пока его не попросили. Подробности в разделе «Нативный клиент».
 
 ## Карта
 
@@ -40,6 +40,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo run -p self-dis-server --bin self-dis -- --data data user add --username ada --password password123 --role admin
 cargo run -p self-dis-server --bin self-dis -- --data data serve
+cargo run -p self-dis-client --bin self-dis-client
 ```
 
 `serve` по умолчанию слушает `127.0.0.1:8080` и UDP `0.0.0.0:9000`. Если HTTP-адрес не задан явно как конкретный IP, в ICE объявляется `127.0.0.1`. Для VPS: `--listen 0.0.0.0:8080 --rtc-ip <публичный IP>`. Страница на чужой машине должна открываться по HTTPS, иначе браузер не даст микрофон. UDP должен доходить до процесса напрямую, HTTP-прокси его не протащит. `localhost` — безопасный контекст, TURN не нужен; не на localhost клиент добавляет `stun:stun.l.google.com:19302`.
@@ -61,6 +62,14 @@ cargo run -p self-dis-server --bin self-dis -- --data data serve
 Криптографию ставить один раз: `str0m::crypto::from_feature_flags().install_process_default()`. Соединение ICE-lite, наружу объявляется host-кандидат. Пакеты чужой комнаты не пересылать. `muted` выбрасывает звук, но человек остаётся в снимке. Ответ SDP и ошибка этого соединения идут в сокет, который его поднял (`signal_id`), а не во всю рассылку. При обрыве сокета голос покидает только тот сокет, который входил.
 
 Ориентир по циклу и состояниям дорожки — пример `str0m` `examples/chat.rs`, но SDP у нас едет по уже существующему WebSocket, а не по data channel. Аудио без ключевых кадров.
+
+## Нативный клиент
+
+Крейт `crates/client`, бинарь `self-dis-client`. Зависит только от `self-dis-protocol`, сервер и браузер не заменяет. Окно — `iced`. Голос — `str0m` (клиент не ICE-lite) и `cpal`. Opus кодирует и смешивает клиент: сервер по-прежнему только пересылает RTP. Адрес сервера спрашивается в окне. Токен лежит в связке ключей ОС.
+
+Шумодав микрофона не входит. Точка вставки — `clean_mic` в `crates/client/src/audio.rs`: локальный PCM до кодирования Opus. Krisp не подключать. В браузере за это отвечает `noiseSuppression` у `getUserMedia`, на десктоп само не переедет.
+
+На macOS `cpal` сам доступ к микрофону не спрашивает. Перед захватом вызывать `permit::ensure_microphone`. В бинарь вшит `Info.plist` с `NSMicrophoneUsageDescription`: без этой строки система диалог не показывает. Сборку macOS гонять на этом Mac. Готовый `.exe` — GitHub Actions `windows-latest`: кросс-компиляция с Mac окно и микрофон не проверяет.
 
 ## Браузер
 

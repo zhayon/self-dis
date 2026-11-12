@@ -1,0 +1,36 @@
+[package]
+name = "self-dis-client"
+version = "0.1.0"
+edition = "2021"
+description = "Native self-dis client for macOS and Windows"
+license = "MIT"
+
+[lib]
+name = "self_dis_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "self-dis-client"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+cpal = "0.18.2"
+dirs = "6"
+iced = { version = "0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "thread-pool", "crisp", "web-colors", "svg"] }
+keyring = "4.2.0"
+opus1 = "0.3.0"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "rustls"] }
+self-dis-protocol = { path = "../protocol" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+str0m = "0.25.0"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
+url = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
