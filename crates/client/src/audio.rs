@@ -160,17 +160,18 @@ impl Playback {
         let device = host
             .default_output_device()
             .ok_or_else(|| "нет устройства воспроизведения".to_string())?;
-        let config = choose_config(
-            device
-                .supported_output_configs()
-                .map_err(|_| "нет устройства воспроизведения".to_string())?,
-        )?;
+        // Не переключать устройство на 48 кГц: на Mac это часто заканчивается
+        // «Sample rate update timed out», хотя свои 24 кГц открываются сразу.
+        let config = device
+            .default_output_config()
+            .map_err(|err| format!("нет устройства воспроизведения: {err}"))?;
         let channels = config.channels() as usize;
+        let rate = config.sample_rate();
         let queues = Arc::new(Mutex::new(Vec::new()));
         let deaf = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let shared = Arc::clone(&queues);
         let silent = Arc::clone(&deaf);
-        let stream = build_output(&device, &config, channels, shared, silent)?;
+        let stream = build_output(&device, &config, channels, rate, shared, silent)?;
         stream
             .play()
             .map_err(|_| "нет устройства воспроизведения".to_string())?;
@@ -309,28 +310,53 @@ fn build_input(
     .map_err(mic_error)
 }
 
+struct Speaker {
+    samples: VecDeque<i16>,
+    cursor: f64,
+}
+
 fn build_output(
     device: &cpal::Device,
     config: &SupportedStreamConfig,
     channels: usize,
+    rate: u32,
     queues: Mix,
     deaf: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<cpal::Stream, String> {
     let err = |error| tracing::warn!(%error, "воспроизведение");
+    let step = if rate == 0 {
+        1.0
+    } else {
+        48_000.0 / f64::from(rate)
+    };
+    let speaker = Arc::new(Mutex::new(Speaker {
+        samples: VecDeque::new(),
+        cursor: 0.0,
+    }));
+    let fail = |err: cpal::Error| format!("нет устройства воспроизведения: {err}");
     match config.sample_format() {
         SampleFormat::F32 => {
             let queues = Arc::clone(&queues);
             let deaf = Arc::clone(&deaf);
+            let speaker = Arc::clone(&speaker);
             device
                 .build_output_stream(
                     (*config).into(),
                     move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                        write_f32(output, channels, &queues, &deaf);
+                        let silent = deaf.load(std::sync::atomic::Ordering::Relaxed);
+                        let mut speaker = speaker.lock().expect("playback");
+                        for frame in output.chunks_mut(channels.max(1)) {
+                            let sample = speaker.next_sample(&queues, step);
+                            let sample = if silent { 0.0 } else { sample };
+                            for slot in frame {
+                                *slot = sample;
+                            }
+                        }
                     },
                     err,
                     None,
                 )
-                .map_err(|_| "нет устройства воспроизведения".to_string())
+                .map_err(fail)
         }
         SampleFormat::I16 => {
             let queues = Arc::clone(&queues);
@@ -340,57 +366,73 @@ fn build_output(
                     (*config).into(),
                     move |output: &mut [i16], _| {
                         let silent = deaf.load(std::sync::atomic::Ordering::Relaxed);
-                        let queues = queues.lock().expect("playback");
+                        let mut speaker = speaker.lock().expect("playback");
                         for frame in output.chunks_mut(channels.max(1)) {
-                            let mixed = if silent {
+                            let sample = if silent {
                                 0
                             } else {
-                                let mut sum = 0i32;
-                                for queue in queues.iter() {
-                                    if let Some(sample) = queue.lock().expect("pcm").pop_front() {
-                                        sum += i32::from(sample);
-                                    }
-                                }
-                                sum.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+                                (speaker.next_sample(&queues, step) * i16::MAX as f32) as i16
                             };
                             for slot in frame {
-                                *slot = mixed;
+                                *slot = sample;
                             }
                         }
                     },
                     err,
                     None,
                 )
-                .map_err(|_| "нет устройства воспроизведения".to_string())
+                .map_err(fail)
         }
-        _ => Err("нет устройства воспроизведения".into()),
+        other => Err(format!("нет устройства воспроизведения: формат {other:?}")),
     }
 }
 
-fn write_f32(
-    output: &mut [f32],
-    channels: usize,
-    queues: &Queues,
-    deaf: &std::sync::atomic::AtomicBool,
-) {
-    let silent = deaf.load(std::sync::atomic::Ordering::Relaxed);
+impl Speaker {
+    fn next_sample(&mut self, queues: &Queues, step: f64) -> f32 {
+        loop {
+            let need = self.cursor.floor() as usize + 2;
+            if self.samples.len() >= need {
+                break;
+            }
+            let Some(sample) = mix_one(queues) else {
+                if self.samples.len() < 2 {
+                    self.samples.clear();
+                    self.cursor = 0.0;
+                    return 0.0;
+                }
+                break;
+            };
+            self.samples.push_back(sample);
+        }
+        let index = self.cursor.floor() as usize;
+        if index + 1 >= self.samples.len() {
+            return 0.0;
+        }
+        let frac = (self.cursor - index as f64) as f32;
+        let left = f32::from(self.samples[index]);
+        let right = f32::from(self.samples[index + 1]);
+        self.cursor += step;
+        let drop_count = self.cursor.floor() as usize;
+        if drop_count > 0 {
+            let drop_count = drop_count.min(self.samples.len());
+            self.samples.drain(..drop_count);
+            self.cursor -= drop_count as f64;
+        }
+        (left + (right - left) * frac) / i16::MAX as f32
+    }
+}
+
+fn mix_one(queues: &Queues) -> Option<i16> {
     let queues = queues.lock().expect("playback");
-    for frame in output.chunks_mut(channels.max(1)) {
-        let mixed = if silent { 0.0 } else { mix(&queues) };
-        for slot in frame {
-            *slot = mixed / i16::MAX as f32;
-        }
-    }
-}
-
-fn mix(queues: &[Arc<Mutex<VecDeque<i16>>>]) -> f32 {
+    let mut heard = false;
     let mut sum = 0i32;
-    for queue in queues {
+    for queue in queues.iter() {
         if let Some(sample) = queue.lock().expect("pcm").pop_front() {
+            heard = true;
             sum += i32::from(sample);
         }
     }
-    f32::from(sum.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16)
+    heard.then_some(sum.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16)
 }
 
 fn push_mono(buf: &Mutex<VecDeque<f32>>, data: &[f32], channels: usize) {
