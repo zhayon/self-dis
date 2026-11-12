@@ -64,6 +64,7 @@ async fn handle(mut socket: WebSocket, state: AppState) {
     }
     tracing::info!(user_id = user.id, username = %user.username, "сокет открыт");
 
+    let why;
     loop {
         tokio::select! {
             incoming = socket.recv() => {
@@ -79,25 +80,40 @@ async fn handle(mut socket: WebSocket, state: AppState) {
                         )
                         .await
                         {
+                            why = "не удалось ответить на кадр".into();
                             break;
                         }
                     }
                     Some(Ok(Message::Binary(_))) => {
                         let error = Error::Invalid("бинарные кадры не поддерживаются".into());
                         if send_message(&mut socket, &error.to_server_message()).await.is_err() {
+                            why = "не удалось отправить ошибку".into();
                             break;
                         }
                     }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(frame))) => {
+                        why = match frame {
+                            Some(frame) => {
+                                format!("клиент закрыл: {} {}", frame.code, frame.reason)
+                            }
+                            None => "клиент закрыл".into(),
+                        };
+                        break;
+                    }
+                    None => {
+                        why = "поток оборвался".into();
+                        break;
+                    }
                     Some(Err(error)) => {
-                        tracing::debug!(%error, "ошибка сокета");
+                        why = format!("ошибка сокета: {error}");
                         break;
                     }
                 }
             }
             event = events.recv() => {
                 if !forward_event(&mut socket, event).await {
+                    why = "не удалось переслать событие".into();
                     break;
                 }
             }
@@ -105,15 +121,23 @@ async fn handle(mut socket: WebSocket, state: AppState) {
                 match signal {
                     Some(message) => {
                         if send_message(&mut socket, &message).await.is_err() {
+                            why = "не удалось отправить сигнал голоса".into();
                             break;
                         }
                     }
-                    None => break,
+                    None => {
+                        why = "канал голоса закрыт".into();
+                        break;
+                    }
                 }
             }
         }
     }
-    tracing::info!(user_id = user.id, "сокет закрыт");
+    close_socket(&user, &why);
+}
+
+fn close_socket(user: &User, reason: &str) {
+    tracing::info!(user_id = user.id, username = %user.username, reason, "сокет закрыт");
 }
 
 async fn authenticate(socket: &mut WebSocket, state: &AppState) -> Result<User, Error> {

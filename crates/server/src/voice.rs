@@ -27,6 +27,33 @@ const READ_SLICE: Duration = Duration::from_millis(20);
 /// Краткий ICE `Disconnected` бывает при добавлении второго участника.
 /// Рвать комнату сразу нельзя: соединение часто само возвращается.
 const ICE_GRACE: Duration = Duration::from_secs(15);
+/// Временная сводка, чтобы по журналу отличить тишину от обрыва.
+const VOICE_PULSE: Duration = Duration::from_secs(10);
+
+macro_rules! voice_trace {
+    ($client:expr, $event:literal) => {
+        tracing::info!(
+            event = $event,
+            user_id = $client.user_id,
+            username = %$client.username,
+            channel = $client.channel_id,
+            ice = $client.ice,
+            connected = $client.connected,
+            muted = $client.muted,
+            tracks_in = $client.tracks_in.len(),
+            tracks_out = open_out($client),
+            udp_in = $client.udp_in,
+            media_in = $client.media_in,
+            media_out = $client.media_out,
+            media_drop = $client.media_drop,
+            unrouted = $client.media_unrouted,
+            udp_out = $client.udp_out,
+            udp_fail = $client.udp_fail,
+            reason = $client.end_reason.unwrap_or("-"),
+            "голос"
+        );
+    };
+}
 
 enum Cmd {
     Join {
@@ -237,14 +264,29 @@ fn run(
     let mut queue: VecDeque<Propagated> = VecDeque::new();
     let mut announced: HashSet<i64> = HashSet::new();
     let mut buf = vec![0; 2000];
+    let mut unmatched: u64 = 0;
+    let mut last_pulse = Instant::now();
 
     loop {
-        let before = clients.len();
-        clients.retain(|client| client.rtc.as_ref().is_none_or(|rtc| rtc.is_alive()));
-        if clients.len() != before {
+        if bury_dead(&mut clients) {
             sync_roster(&clients, &voice, &event_tx, &mut announced);
         }
         expire_ice(&mut clients);
+        if last_pulse.elapsed() >= VOICE_PULSE {
+            if !clients.is_empty() {
+                for client in &clients {
+                    voice_trace!(client, "сводка");
+                }
+                if unmatched > 0 {
+                    tracing::info!(event = "мимо", unmatched, "голос");
+                }
+                for client in &mut clients {
+                    client.clear_counts();
+                }
+            }
+            unmatched = 0;
+            last_pulse = Instant::now();
+        }
 
         let mut timeout = Instant::now() + READ_SLICE;
         for client in &mut clients {
@@ -285,6 +327,8 @@ fn run(
         if let Some(input) = read_socket_input(&socket, advertise, &mut buf) {
             if let Some(client) = clients.iter_mut().find(|client| client.accepts(&input)) {
                 client.handle_input(input);
+            } else {
+                unmatched += 1;
             }
         }
         let now = Instant::now();
@@ -303,10 +347,24 @@ fn apply_one_ice(clients: &mut [Client]) -> bool {
         let candidate = match Candidate::from_sdp_string(line.trim()) {
             Ok(candidate) => candidate,
             Err(err) => {
-                tracing::debug!(error = %err, "пропущен ice-кандидат");
+                tracing::info!(
+                    event = "кандидат",
+                    user_id = client.user_id,
+                    username = %client.username,
+                    error = %err,
+                    "голос"
+                );
                 continue;
             }
         };
+        tracing::info!(
+            event = "кандидат",
+            user_id = client.user_id,
+            username = %client.username,
+            kind = %candidate.kind(),
+            addr = %candidate.addr(),
+            "голос"
+        );
         if let Some(rtc) = client.rtc.as_mut() {
             rtc.add_remote_candidate(candidate);
             return true;
@@ -331,23 +389,19 @@ fn apply_cmd(
             channel_id,
         } => {
             if let Some(client) = clients.iter_mut().find(|client| client.user_id == user_id) {
-                client.channel_id = channel_id;
-                client.username = username;
-                client.signal_id = signal_id;
-                client.muted = false;
-                client.rtc = None;
-                client.pending = None;
-                client.connected = false;
-                client.tracks_in.clear();
-                client.tracks_out.clear();
-                client.pending_ice.clear();
-                client.disconnected_at = None;
+                client.restart(signal_id, username, channel_id);
             } else {
                 clients.push(Client::new(signal_id, user_id, username, channel_id));
+            }
+            if let Some(client) = clients.iter().find(|client| client.user_id == user_id) {
+                voice_trace!(client, "вошёл");
             }
             sync_roster(clients, voice, event_tx, announced);
         }
         Cmd::Leave { user_id } => {
+            if let Some(client) = clients.iter().find(|client| client.user_id == user_id) {
+                voice_trace!(client, "вышел");
+            }
             clients.retain(|client| client.user_id != user_id);
             sync_roster(clients, voice, event_tx, announced);
         }
@@ -358,6 +412,13 @@ fn apply_cmd(
         Cmd::Mute { user_id, muted } => {
             if let Some(client) = clients.iter_mut().find(|client| client.user_id == user_id) {
                 client.muted = muted;
+                tracing::info!(
+                    event = "mute",
+                    user_id = client.user_id,
+                    username = %client.username,
+                    muted,
+                    "голос"
+                );
             }
             sync_roster(clients, voice, event_tx, announced);
         }
@@ -375,13 +436,24 @@ fn apply_cmd(
                 });
             match answer {
                 Some(Ok(sdp)) => {
+                    if let Some(client) = clients.iter().find(|client| client.user_id == user_id) {
+                        tracing::info!(
+                            event = "offer",
+                            user_id = client.user_id,
+                            username = %client.username,
+                            "голос"
+                        );
+                    }
                     let _ = event_tx.send(VoiceOut::Signal {
                         signal_id,
                         message: ServerMessage::RtcAnswer { sdp },
                     });
                     adopt_existing_tracks(clients, user_id);
                 }
-                Some(Err(err)) => signal_error(event_tx, signal_id, &err),
+                Some(Err(err)) => {
+                    tracing::info!(event = "offer", user_id, error = %err, "голос");
+                    signal_error(event_tx, signal_id, &err);
+                }
                 None => signal_error(event_tx, signal_id, "сначала войдите в голосовую комнату"),
             }
         }
@@ -390,7 +462,22 @@ fn apply_cmd(
                 return;
             };
             if let Err(err) = client.accept_answer(&sdp) {
+                tracing::info!(
+                    event = "answer",
+                    user_id = client.user_id,
+                    username = %client.username,
+                    error = %err,
+                    "голос"
+                );
                 signal_error(event_tx, client.signal_id, &err);
+            } else {
+                tracing::info!(
+                    event = "answer",
+                    user_id = client.user_id,
+                    username = %client.username,
+                    tracks = open_out(client),
+                    "голос"
+                );
             }
         }
         Cmd::Ice { user_id, candidate } => {
@@ -484,6 +571,37 @@ fn sync_roster(
     *announced = current;
 }
 
+fn bury_dead(clients: &mut Vec<Client>) -> bool {
+    let mut removed = false;
+    clients.retain(|client| {
+        let alive = client.rtc.as_ref().is_none_or(|rtc| rtc.is_alive());
+        if !alive {
+            voice_trace!(client, "выбыл");
+            removed = true;
+        }
+        alive
+    });
+    removed
+}
+
+fn open_out(client: &Client) -> usize {
+    client
+        .tracks_out
+        .iter()
+        .filter(|track| matches!(track.state, TrackOutState::Open(_)))
+        .count()
+}
+
+fn ice_name(state: IceConnectionState) -> &'static str {
+    match state {
+        IceConnectionState::New => "new",
+        IceConnectionState::Checking => "checking",
+        IceConnectionState::Connected => "connected",
+        IceConnectionState::Completed => "completed",
+        IceConnectionState::Disconnected => "disconnected",
+    }
+}
+
 fn expire_ice(clients: &mut [Client]) {
     let now = Instant::now();
     for client in clients {
@@ -493,6 +611,14 @@ fn expire_ice(clients: &mut [Client]) {
         if now.duration_since(since) < ICE_GRACE {
             continue;
         }
+        tracing::info!(
+            event = "льгота",
+            user_id = client.user_id,
+            username = %client.username,
+            ice = client.ice,
+            "голос"
+        );
+        client.end_reason = Some("нет связи 15 с");
         if let Some(rtc) = client.rtc.as_mut() {
             if rtc.is_alive() {
                 rtc.disconnect();
@@ -595,6 +721,16 @@ struct Client {
     tracks_out: Vec<TrackOut>,
     pending_ice: Vec<String>,
     disconnected_at: Option<Instant>,
+    ice: &'static str,
+    end_reason: Option<&'static str>,
+    announced_media: bool,
+    udp_in: u64,
+    media_in: u64,
+    media_out: u64,
+    media_drop: u64,
+    media_unrouted: u64,
+    udp_out: u64,
+    udp_fail: u64,
 }
 
 struct TrackIn {
@@ -664,7 +800,45 @@ impl Client {
             tracks_out: Vec::new(),
             pending_ice: Vec::new(),
             disconnected_at: None,
+            ice: "нет",
+            end_reason: None,
+            announced_media: false,
+            udp_in: 0,
+            media_in: 0,
+            media_out: 0,
+            media_drop: 0,
+            media_unrouted: 0,
+            udp_out: 0,
+            udp_fail: 0,
         }
+    }
+
+    fn restart(&mut self, signal_id: u64, username: String, channel_id: i64) {
+        self.signal_id = signal_id;
+        self.username = username;
+        self.channel_id = channel_id;
+        self.muted = false;
+        self.connected = false;
+        self.rtc = None;
+        self.pending = None;
+        self.tracks_in.clear();
+        self.tracks_out.clear();
+        self.pending_ice.clear();
+        self.disconnected_at = None;
+        self.ice = "нет";
+        self.end_reason = None;
+        self.announced_media = false;
+        self.clear_counts();
+    }
+
+    fn clear_counts(&mut self) {
+        self.udp_in = 0;
+        self.media_in = 0;
+        self.media_out = 0;
+        self.media_drop = 0;
+        self.media_unrouted = 0;
+        self.udp_out = 0;
+        self.udp_fail = 0;
     }
 
     fn accept_offer(&mut self, sdp: &str, advertise: SocketAddr) -> Result<String, String> {
@@ -680,6 +854,10 @@ impl Client {
         self.pending = None;
         self.connected = false;
         self.disconnected_at = None;
+        self.ice = "offer";
+        self.end_reason = None;
+        self.announced_media = false;
+        self.clear_counts();
         self.tracks_in.clear();
         self.tracks_out.clear();
         Ok(answer.to_sdp_string())
@@ -709,6 +887,9 @@ impl Client {
     }
 
     fn handle_input(&mut self, input: Input) {
+        if matches!(input, Input::Receive(_, _)) {
+            self.udp_in += 1;
+        }
         let Some(rtc) = self.rtc.as_mut() else {
             return;
         };
@@ -716,7 +897,14 @@ impl Client {
             return;
         }
         if let Err(err) = rtc.handle_input(input) {
-            tracing::info!(user_id = self.user_id, error = %err, "голос отключён");
+            self.end_reason = Some("ошибка пакета");
+            tracing::info!(
+                event = "ошибка",
+                user_id = self.user_id,
+                username = %self.username,
+                error = %err,
+                "голос"
+            );
             rtc.disconnect();
         }
     }
@@ -735,7 +923,14 @@ impl Client {
         match self.rtc.as_mut().unwrap().poll_output() {
             Ok(output) => self.handle_output(output, socket),
             Err(err) => {
-                tracing::info!(user_id = self.user_id, error = %err, "ошибка голоса");
+                self.end_reason = Some("ошибка вывода");
+                tracing::info!(
+                    event = "ошибка",
+                    user_id = self.user_id,
+                    username = %self.username,
+                    error = %err,
+                    "голос"
+                );
                 if let Some(rtc) = self.rtc.as_mut() {
                     rtc.disconnect();
                 }
@@ -747,8 +942,21 @@ impl Client {
     fn handle_output(&mut self, output: Output, socket: &UdpSocket) -> Propagated {
         match output {
             Output::Transmit(transmit) => {
-                if let Err(err) = socket.send_to(&transmit.contents, transmit.destination) {
-                    tracing::debug!(error = %err, "не удалось отправить udp");
+                match socket.send_to(&transmit.contents, transmit.destination) {
+                    Ok(_) => self.udp_out += 1,
+                    Err(err) => {
+                        self.udp_fail += 1;
+                        if self.udp_fail == 1 {
+                            tracing::warn!(
+                                event = "udp",
+                                user_id = self.user_id,
+                                username = %self.username,
+                                error = %err,
+                                dest = %transmit.destination,
+                                "голос"
+                            );
+                        }
+                    }
                 }
                 Propagated::Noop
             }
@@ -756,22 +964,46 @@ impl Client {
             Output::Event(event) => match event {
                 Event::Connected => {
                     self.connected = true;
+                    tracing::info!(
+                        event = "dtls",
+                        user_id = self.user_id,
+                        username = %self.username,
+                        "голос"
+                    );
                     Propagated::Noop
                 }
-                Event::IceConnectionStateChange(
-                    IceConnectionState::Connected | IceConnectionState::Completed,
-                ) => {
-                    self.connected = true;
-                    self.disconnected_at = None;
-                    Propagated::Noop
-                }
-                Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
-                    if self.disconnected_at.is_none() {
-                        self.disconnected_at = Some(Instant::now());
+                Event::IceConnectionStateChange(state) => {
+                    self.ice = ice_name(state);
+                    tracing::info!(
+                        event = "ice",
+                        user_id = self.user_id,
+                        username = %self.username,
+                        ice = self.ice,
+                        "голос"
+                    );
+                    match state {
+                        IceConnectionState::Connected | IceConnectionState::Completed => {
+                            self.connected = true;
+                            self.disconnected_at = None;
+                            self.end_reason = None;
+                        }
+                        IceConnectionState::Disconnected => {
+                            if self.disconnected_at.is_none() {
+                                self.disconnected_at = Some(Instant::now());
+                            }
+                        }
+                        IceConnectionState::New | IceConnectionState::Checking => {}
                     }
                     Propagated::Noop
                 }
                 Event::MediaAdded(added) if added.kind == MediaKind::Audio => {
+                    tracing::info!(
+                        event = "дорожка",
+                        user_id = self.user_id,
+                        username = %self.username,
+                        mid = ?added.mid,
+                        "голос"
+                    );
                     let track = TrackInEntry {
                         id: Arc::new(TrackIn {
                             origin: self.user_id,
@@ -783,10 +1015,28 @@ impl Client {
                     self.tracks_in.push(track);
                     Propagated::TrackOpen(self.user_id, weak)
                 }
-                Event::MediaData(data) if !self.muted => Propagated::Media {
-                    origin: self.user_id,
-                    data: Box::new(data),
-                },
+                Event::MediaData(data) => {
+                    self.media_in += 1;
+                    if !self.announced_media {
+                        self.announced_media = true;
+                        tracing::info!(
+                            event = "звук",
+                            user_id = self.user_id,
+                            username = %self.username,
+                            muted = self.muted,
+                            bytes = data.data.len(),
+                            "голос"
+                        );
+                    }
+                    if self.muted {
+                        Propagated::Noop
+                    } else {
+                        Propagated::Media {
+                            origin: self.user_id,
+                            data: Box::new(data),
+                        }
+                    }
+                }
                 _ => Propagated::Noop,
             },
         }
@@ -839,6 +1089,12 @@ impl Client {
             return false;
         };
         self.pending = Some(pending);
+        tracing::info!(
+            event = "дорожки",
+            user_id = self.user_id,
+            username = %self.username,
+            "голос"
+        );
         let _ = event_tx.send(VoiceOut::Signal {
             signal_id: self.signal_id,
             message: ServerMessage::RtcOffer {
@@ -857,20 +1113,46 @@ impl Client {
                 None
             }
         }) else {
+            self.media_unrouted += 1;
             return;
         };
         let Some(rtc) = self.rtc.as_mut() else {
+            self.media_unrouted += 1;
             return;
         };
         let writer = rtc.writer(mid);
         let Some(writer) = writer else {
+            self.media_unrouted += 1;
             return;
         };
         let Some(pt) = writer.match_params(data.params) else {
+            self.media_drop += 1;
+            if self.media_drop == 1 {
+                tracing::info!(
+                    event = "кодек",
+                    user_id = self.user_id,
+                    username = %self.username,
+                    from = origin,
+                    params = ?data.params,
+                    "голос"
+                );
+            }
             return;
         };
         if let Err(err) = writer.write(pt, data.network_time, data.time, Arc::clone(&data.data)) {
-            tracing::debug!(user_id = self.user_id, error = %err, "не удалось переслать звук");
+            self.media_drop += 1;
+            if self.media_drop == 1 {
+                tracing::info!(
+                    event = "кодек",
+                    user_id = self.user_id,
+                    username = %self.username,
+                    from = origin,
+                    error = %err,
+                    "голос"
+                );
+            }
+        } else {
+            self.media_out += 1;
         }
     }
 }
