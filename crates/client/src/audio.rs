@@ -97,7 +97,9 @@ impl Capture {
         let device = host
             .default_input_device()
             .ok_or_else(|| "нет доступа к микрофону".to_string())?;
-        let config = choose_config(device.supported_input_configs().map_err(mic_error)?)?;
+        // Частоту устройства не меняем: Windows и macOS часто отказывают
+        // в захвате, если просить не их родной режим.
+        let config = device.default_input_config().map_err(mic_error)?;
         let rate = config.sample_rate();
         let channels = config.channels() as usize;
         let samples = Arc::new(Mutex::new(VecDeque::new()));
@@ -261,24 +263,6 @@ fn to_i16(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
 }
 
-fn choose_config(
-    configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
-) -> Result<SupportedStreamConfig, String> {
-    let range = configs
-        .min_by_key(|config| {
-            let covers = config.min_sample_rate() <= 48_000 && config.max_sample_rate() >= 48_000;
-            let penalty = if covers { 0 } else { 1000 };
-            penalty + u32::from(config.channels())
-        })
-        .ok_or_else(|| "нет доступа к микрофону".to_string())?;
-    let rate = if range.min_sample_rate() <= 48_000 && range.max_sample_rate() >= 48_000 {
-        48_000
-    } else {
-        range.max_sample_rate()
-    };
-    Ok(range.with_sample_rate(rate))
-}
-
 fn build_input(
     device: &cpal::Device,
     config: &SupportedStreamConfig,
@@ -305,7 +289,31 @@ fn build_input(
             err,
             None,
         ),
-        _ => return Err("нет доступа к микрофону".into()),
+        SampleFormat::I32 => device.build_input_stream(
+            (*config).into(),
+            move |data: &[i32], _| {
+                let floats: Vec<f32> = data
+                    .iter()
+                    .map(|sample| *sample as f32 / i32::MAX as f32)
+                    .collect();
+                push_mono(&incoming, &floats, channels);
+            },
+            err,
+            None,
+        ),
+        SampleFormat::U16 => device.build_input_stream(
+            (*config).into(),
+            move |data: &[u16], _| {
+                let floats: Vec<f32> = data
+                    .iter()
+                    .map(|sample| (*sample as f32 - 32768.0) / 32768.0)
+                    .collect();
+                push_mono(&incoming, &floats, channels);
+            },
+            err,
+            None,
+        ),
+        other => return Err(format!("нет доступа к микрофону: формат {other:?}")),
     }
     .map_err(mic_error)
 }
@@ -451,9 +459,16 @@ fn push_mono(buf: &Mutex<VecDeque<f32>>, data: &[f32], channels: usize) {
     }
 }
 
-fn mic_error(err: impl ToString) -> String {
-    let _ = err;
-    "нет доступа к микрофону".into()
+fn mic_error(err: impl std::fmt::Display) -> String {
+    let text = err.to_string();
+    let denied = text.to_lowercase().contains("denied")
+        || text.to_lowercase().contains("access")
+        || text.contains("0x80070005");
+    if denied {
+        "нет доступа к микрофону".into()
+    } else {
+        format!("нет доступа к микрофону: {text}")
+    }
 }
 
 #[cfg(test)]
