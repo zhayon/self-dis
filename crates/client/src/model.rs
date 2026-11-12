@@ -62,8 +62,13 @@ impl Model {
                 }
                 Effect::None
             }
-            ServerMessage::Error { .. } => {
-                if self.voice_channel_id.is_some() && !self.voice_up {
+            ServerMessage::Error { code, .. } => {
+                // Ошибка SDP при входе второго человека не должна выкидывать из комнаты.
+                // Выходим сразу только если сервер нас туда и не пустил.
+                if self.voice_channel_id.is_some()
+                    && !self.voice_up
+                    && matches!(code.as_str(), "voice_not_ready" | "forbidden" | "not_found")
+                {
                     self.clear_voice();
                     Effect::LeaveVoice
                 } else {

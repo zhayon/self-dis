@@ -102,7 +102,9 @@ fn run(
         match commands.try_recv() {
             Ok(VoiceCommand::Stop) => return Ok(()),
             Ok(command) => {
-                call.apply(command, events)?;
+                if let Err(err) = call.apply(command, events) {
+                    tracing::info!(error = %err, "кадр голоса не применён");
+                }
                 continue;
             }
             Err(mpsc::TryRecvError::Empty) => {}
@@ -166,6 +168,7 @@ struct Call {
     label: String,
     self_id: i64,
     reported: HashMap<i64, (bool, u16)>,
+    queued_offer: Option<String>,
 }
 
 impl Call {
@@ -233,6 +236,7 @@ impl Call {
             label: String::new(),
             self_id: user_id,
             reported: HashMap::new(),
+            queued_offer: None,
         };
         call.drain(events)?;
         let _ = events.send(VoiceEvent::Signal(ClientMessage::RtcOffer {
@@ -353,8 +357,20 @@ impl Call {
                 }
                 Ok(())
             }
-            VoiceCommand::Answer(sdp) => self.accept_answer(&sdp),
-            VoiceCommand::Offer(sdp) => self.accept_offer(&sdp, events),
+            VoiceCommand::Answer(sdp) => {
+                self.accept_answer(&sdp)?;
+                if let Some(offer) = self.queued_offer.take() {
+                    self.accept_offer(&offer, events)?;
+                }
+                Ok(())
+            }
+            VoiceCommand::Offer(sdp) => {
+                if !self.answered || self.pending.is_some() {
+                    self.queued_offer = Some(sdp);
+                    return Ok(());
+                }
+                self.accept_offer(&sdp, events)
+            }
             VoiceCommand::Ice(line) => {
                 if self.answered {
                     self.add_ice(&line);
@@ -384,9 +400,6 @@ impl Call {
     }
 
     fn accept_offer(&mut self, sdp: &str, events: &Sender<VoiceEvent>) -> Result<(), String> {
-        if self.pending.is_some() {
-            return Err("не удалось подключить голос".into());
-        }
         let offer = SdpOffer::from_sdp_string(sdp).map_err(voice_failure)?;
         let answer = self
             .rtc

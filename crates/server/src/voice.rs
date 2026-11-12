@@ -24,6 +24,9 @@ use crate::error::Error;
 use crate::state::AppState;
 
 const READ_SLICE: Duration = Duration::from_millis(20);
+/// Краткий ICE `Disconnected` бывает при добавлении второго участника.
+/// Рвать комнату сразу нельзя: соединение часто само возвращается.
+const ICE_GRACE: Duration = Duration::from_secs(15);
 
 enum Cmd {
     Join {
@@ -241,6 +244,7 @@ fn run(
         if clients.len() != before {
             sync_roster(&clients, &voice, &event_tx, &mut announced);
         }
+        expire_ice(&mut clients);
 
         let mut timeout = Instant::now() + READ_SLICE;
         for client in &mut clients {
@@ -337,6 +341,7 @@ fn apply_cmd(
                 client.tracks_in.clear();
                 client.tracks_out.clear();
                 client.pending_ice.clear();
+                client.disconnected_at = None;
             } else {
                 clients.push(Client::new(signal_id, user_id, username, channel_id));
             }
@@ -479,6 +484,25 @@ fn sync_roster(
     *announced = current;
 }
 
+fn expire_ice(clients: &mut [Client]) {
+    let now = Instant::now();
+    for client in clients {
+        let Some(since) = client.disconnected_at else {
+            continue;
+        };
+        if now.duration_since(since) < ICE_GRACE {
+            continue;
+        }
+        if let Some(rtc) = client.rtc.as_mut() {
+            if rtc.is_alive() {
+                rtc.disconnect();
+            }
+        }
+        client.disconnected_at = None;
+        return;
+    }
+}
+
 fn poll_until_timeout(
     client: &mut Client,
     queue: &mut VecDeque<Propagated>,
@@ -570,6 +594,7 @@ struct Client {
     tracks_in: Vec<TrackInEntry>,
     tracks_out: Vec<TrackOut>,
     pending_ice: Vec<String>,
+    disconnected_at: Option<Instant>,
 }
 
 struct TrackIn {
@@ -638,6 +663,7 @@ impl Client {
             tracks_in: Vec::new(),
             tracks_out: Vec::new(),
             pending_ice: Vec::new(),
+            disconnected_at: None,
         }
     }
 
@@ -653,6 +679,7 @@ impl Client {
         self.rtc = Some(rtc);
         self.pending = None;
         self.connected = false;
+        self.disconnected_at = None;
         self.tracks_in.clear();
         self.tracks_out.clear();
         Ok(answer.to_sdp_string())
@@ -735,11 +762,12 @@ impl Client {
                     IceConnectionState::Connected | IceConnectionState::Completed,
                 ) => {
                     self.connected = true;
+                    self.disconnected_at = None;
                     Propagated::Noop
                 }
                 Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
-                    if let Some(rtc) = self.rtc.as_mut() {
-                        rtc.disconnect();
+                    if self.disconnected_at.is_none() {
+                        self.disconnected_at = Some(Instant::now());
                     }
                     Propagated::Noop
                 }
