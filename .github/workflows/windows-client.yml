@@ -1,0 +1,33 @@
+name: Windows client
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Собрать клиент
+        run: cargo build --release -p self-dis-client --bin self-dis-client
+      - uses: actions/upload-artifact@v4
+        with:
+          name: self-dis-client-windows
+          path: target/release/self-dis-client.exe
+          if-no-files-found: error
+      - name: Опубликовать клиент
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete windows-bin --yes --cleanup-tag || true
+          gh release create windows-bin target/release/self-dis-client.exe \
+            --title "Windows" \
+            --notes "Клиент для Windows. Один exe, обновляется при сборке main." \
+            --latest=false

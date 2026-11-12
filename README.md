@@ -33,6 +33,8 @@ cargo run -p self-dis-client --bin self-dis-client
 
 В окне нужен адрес сервера, для этой машины `http://127.0.0.1:8080`. Вход запоминается в связке ключей. Голос идёт тем же протоколом, что у страницы: сервер только пересылает звук.
 
+Готовый файл для Windows, без установки: [self-dis-client.exe](https://github.com/zhayon/self-dis/releases/download/windows-bin/self-dis-client.exe). Он обновляется при сборке `main`.
+
 Участника без прав на комнаты добавляют так:
 
 ```shell
